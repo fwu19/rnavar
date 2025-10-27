@@ -6,18 +6,18 @@
 
 // local
 include { GTF2BED                   } from '../modules/local/gtf2bed'
+include { FASTP                   } from '../modules/local2/fastp.nf'
+include { WRITE_CSV                   } from '../modules/local2/write_csv.nf'
+include { ADD_METADATA                   } from '../modules/local2/add_metadata.nf'
 
 // nf-core
 include { CAT_FASTQ                 } from '../modules/nf-core/cat/fastq'
 include { FASTQC                    } from '../modules/nf-core/fastqc'
+include { FASTQC as FASTQC_TRIM     } from '../modules/nf-core/fastqc'
 include { GATK4_BASERECALIBRATOR    } from '../modules/nf-core/gatk4/baserecalibrator'
 include { GATK4_BEDTOINTERVALLIST   } from '../modules/nf-core/gatk4/bedtointervallist'
-include { GATK4_COMBINEGVCFS        } from '../modules/nf-core/gatk4/combinegvcfs'
-include { GATK4_HAPLOTYPECALLER     } from '../modules/nf-core/gatk4/haplotypecaller'
 include { GATK4_INDEXFEATUREFILE    } from '../modules/nf-core/gatk4/indexfeaturefile'
 include { GATK4_INTERVALLISTTOOLS   } from '../modules/nf-core/gatk4/intervallisttools'
-include { GATK4_MERGEVCFS           } from '../modules/nf-core/gatk4/mergevcfs'
-include { GATK4_VARIANTFILTRATION   } from '../modules/nf-core/gatk4/variantfiltration'
 include { MULTIQC                   } from '../modules/nf-core/multiqc'
 include { SAMTOOLS_INDEX            } from '../modules/nf-core/samtools/index'
 include { SEQ2HLA                   } from '../modules/nf-core/seq2hla/main'
@@ -28,7 +28,6 @@ include { UMITOOLS_EXTRACT          } from '../modules/nf-core/umitools/extract'
 // local
 include { RECALIBRATE               } from '../subworkflows/local/recalibrate'
 include { SPLITNCIGAR               } from '../subworkflows/local/splitncigar'
-include { VCF_ANNOTATE_ALL          } from '../subworkflows/local/vcf_annotate_all'
 include { PREPARE_ALIGNMENT         } from '../subworkflows/local/prepare_alignment'
 
 // nf-core
@@ -47,9 +46,6 @@ include { checkSamplesAfterGrouping } from '../subworkflows/local/utils_nfcore_r
 workflow RNAVAR {
     take:
     input
-    bcftools_annotations
-    bcftools_annotations_tbi
-    bcftools_header_lines
     dbsnp
     dbsnp_tbi
     dict
@@ -60,14 +56,6 @@ workflow RNAVAR {
     known_sites
     known_sites_tbi
     star_index
-    snpeff_cache
-    snpeff_db
-    vep_genome
-    vep_species
-    vep_cache_version
-    vep_include_fasta
-    vep_cache
-    vep_extra_files
     seq_center
     seq_platform
     aligner
@@ -77,8 +65,6 @@ workflow RNAVAR {
     skip_multiqc
     skip_baserecalibration
     skip_intervallisttools
-    skip_variantannotation
-    skip_variantfiltration
     star_ignore_sjdbgtf
     tools
 
@@ -124,18 +110,28 @@ workflow RNAVAR {
     reports = reports.mix(FASTQC.out.zip.collect { _meta, logs -> logs })
     versions = versions.mix(FASTQC.out.versions)
 
+    //MODULE: Trim adapter sequences
+    // !! works for pair ends only!!
+    FASTP(cat_fastq)
+    def trim_fastq = FASTP.out.reads
+
+    // MODULE: Generate QC summary using FastQC
+    FASTQC_TRIM(trim_fastq)
+    reports = reports.mix(FASTQC_TRIM.out.zip.collect { _meta, logs -> logs })
+    versions = versions.mix(FASTQC_TRIM.out.versions)
+
     // MODULE: Extract UMIs from reads
 
     def umi_extracted_reads = Channel.empty()
     if (extract_umi) {
         UMITOOLS_EXTRACT(
-            cat_fastq
+            trim_fastq
         )
         versions = versions.mix(UMITOOLS_EXTRACT.out.versions)
         umi_extracted_reads = UMITOOLS_EXTRACT.out.reads
     }
     else {
-        umi_extracted_reads = cat_fastq
+        umi_extracted_reads = trim_fastq
     }
 
     // MODULE: Prepare the interval list from the GTF file using GATK4 BedToIntervalList
@@ -268,125 +264,28 @@ workflow RNAVAR {
             bam_variant_calling = splitncigar_bam_bai
         }
 
-        def haplotypecaller_interval_bam = bam_variant_calling
-            .combine(interval_list_split)
-            .map { meta, bam, bai, interval_lists ->
-                [meta + [interval_count: interval_lists instanceof List ? interval_lists.size() : 1], bam, bai, interval_lists.size() > 1 ? interval_lists : [interval_lists]]
-            }
-            .transpose(by: 3)
-            .map { meta, bam, bai, interval_list_ ->
-                [meta + [id: meta.id + "_" + interval_list_.baseName, sample: meta.id, variantcaller: 'haplotypecaller'], bam, bai, interval_list_, []]
-            }
 
-        // MODULE: HaplotypeCaller from GATK4
-        // Calls germline SNPs and indels via local re-assembly of haplotypes.
-
-        GATK4_HAPLOTYPECALLER(
-            haplotypecaller_interval_bam,
-            fasta,
-            fasta_fai,
-            dict,
-            dbsnp,
-            dbsnp_tbi,
+        // write out recalibrated.csv
+        def my_dir = new File("${params.outdir}")
+        def outdir = my_dir.absolutePath
+        WRITE_CSV(
+            bam_variant_calling
+                .map { meta, bam, bai ->
+                [ [ patient: meta.id ] + [ sample: meta.id ] + [ bam: "${outdir}/preprocessing/" + meta.id + "/" + bam.name ] + [ bai: "${outdir}/preprocessing/" + meta.id + "/" + bai.name ] ]
+                }
+                .collect(),
+            "recalibrated.csv"
         )
+        csv = WRITE_CSV.out.csv
 
-        def haplotypecaller_out = GATK4_HAPLOTYPECALLER.out.vcf
-            .join(GATK4_HAPLOTYPECALLER.out.tbi, failOnMismatch: true, failOnDuplicate: true)
-            .map { meta, vcf, tbi ->
-                [groupKey(meta + [id: meta.sample] - meta.subMap('sample', "interval_count"), meta.interval_count), vcf, tbi]
-            }
-            .groupTuple()
-
-        versions = versions.mix(GATK4_HAPLOTYPECALLER.out.versions)
-
-        def haplotypecaller_vcf = Channel.empty()
-        if (!generate_gvcf) {
-            // MODULE: MergeVCFS from GATK4
-            // Merge multiple VCF files into one VCF
-            def haplotypecaller_raw = haplotypecaller_out.map { meta, vcfs, _tbis -> [meta, vcfs] }
-            GATK4_MERGEVCFS(
-                haplotypecaller_raw,
-                dict,
+        if (params.metadata){
+            ADD_METADATA(
+                csv,
+                file(params.metadata, checkIfExists: true),
+                'recalibrated.csv'
             )
-            haplotypecaller_vcf = GATK4_MERGEVCFS.out.vcf
-            versions = versions.mix(GATK4_MERGEVCFS.out.versions)
-
-            // MODULE: Index the VCF using TABIX
-            TABIX(
-                haplotypecaller_vcf
-            )
-            versions = versions.mix(TABIX.out.versions)
-
-            def haplotypecaller_indices = TABIX.out.tbi.mix(TABIX.out.csi)
-
-            def haplotypecaller_vcf_tbi = haplotypecaller_vcf.join(haplotypecaller_indices, failOnDuplicate: true, failOnMismatch: true)
-
-            def final_vcf = Channel.empty()
-
-            // MODULE: VariantFiltration from GATK4
-            // Filter variant calls based on certain criteria
-            if (!skip_variantfiltration && !bam_csi_index) {
-
-                GATK4_VARIANTFILTRATION(
-                    haplotypecaller_vcf_tbi,
-                    fasta,
-                    fasta_fai,
-                    dict,
-                    [[:], []],
-                )
-
-                def filtered_vcf = GATK4_VARIANTFILTRATION.out.vcf
-                final_vcf = filtered_vcf
-                versions = versions.mix(GATK4_VARIANTFILTRATION.out.versions)
-            }
-            else {
-                final_vcf = haplotypecaller_vcf
-            }
-
-            // SUBWORKFLOW: Annotate variants using snpEff and Ensembl VEP if enabled.
-            if ((!skip_variantannotation) && (tools.contains('bcfann') || tools.contains('merge') || tools.contains('snpeff') || tools.contains('vep'))) {
-
-                final_vcf = final_vcf.mix(parsed_input.vcf.map { meta, vcf, _tbi -> [meta, vcf] })
-
-                VCF_ANNOTATE_ALL(
-                    final_vcf.map { meta, vcf -> [meta + [file_name: vcf.baseName], vcf] },
-                    fasta.map { meta, fasta_ -> [meta, vep_include_fasta ? fasta_ : []] },
-                    tools,
-                    snpeff_db,
-                    snpeff_cache,
-                    vep_genome,
-                    vep_species,
-                    vep_cache_version,
-                    vep_cache,
-                    vep_extra_files,
-                    bcftools_annotations,
-                    bcftools_annotations_tbi,
-                    bcftools_header_lines,
-                )
-
-                // Gather used softwares versions
-                versions = versions.mix(VCF_ANNOTATE_ALL.out.versions)
-                reports = reports.mix(VCF_ANNOTATE_ALL.out.reports)
-            }
         }
-        else {
 
-            // MODULE: CombineGVCFS from GATK4
-            // Merge multiple GVCF files into one GVCF
-            GATK4_COMBINEGVCFS(
-                haplotypecaller_out,
-                fasta.map { _meta, fasta_ -> fasta_ },
-                fasta_fai.map { _meta, fai -> fai },
-                dict.map { _meta, dict_ -> dict_ },
-            )
-            def haplotypecaller_gvcf = GATK4_COMBINEGVCFS.out.combined_gvcf
-            versions = versions.mix(GATK4_COMBINEGVCFS.out.versions)
-
-            // MODULE: Index the VCF using TABIX
-            TABIXGVCF(haplotypecaller_gvcf)
-
-            versions = versions.mix(TABIXGVCF.out.versions)
-        }
     }
 
     emit:

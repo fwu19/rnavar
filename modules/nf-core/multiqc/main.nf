@@ -1,10 +1,11 @@
 process MULTIQC {
     label 'process_single'
+    module = [ 'MultiQC/1.21-foss-2023a' ]
+    //conda "${moduleDir}/environment.yml"
+    //container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
+    //    'https://depot.galaxyproject.org/singularity/multiqc:1.30--pyhdfd78af_1' :
+    //    'biocontainers/multiqc:1.30--pyhdfd78af_1' }"
 
-    conda "${moduleDir}/environment.yml"
-    container "${ workflow.containerEngine == 'singularity' && !task.ext.singularity_pull_docker_container ?
-        'https://depot.galaxyproject.org/singularity/multiqc:1.30--pyhdfd78af_1' :
-        'biocontainers/multiqc:1.30--pyhdfd78af_1' }"
 
     input:
     path  multiqc_files, stageAs: "?/*"

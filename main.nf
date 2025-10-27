@@ -163,9 +163,6 @@ workflow NFCORE_RNAVAR {
     //
     RNAVAR(
         samplesheet,
-        PREPARE_GENOME.out.bcfann,
-        PREPARE_GENOME.out.bcfann_tbi,
-        params.bcftools_header_lines ? Channel.fromPath(params.bcftools_header_lines).collect() : Channel.empty(),
         PREPARE_GENOME.out.dbsnp,
         PREPARE_GENOME.out.dbsnp_tbi,
         PREPARE_GENOME.out.dict,
@@ -176,14 +173,6 @@ workflow NFCORE_RNAVAR {
         PREPARE_GENOME.out.known_sites,
         PREPARE_GENOME.out.known_sites_tbi,
         PREPARE_GENOME.out.star_index,
-        snpeff_cache,
-        params.snpeff_db,
-        params.vep_genome,
-        params.vep_species,
-        params.vep_cache_version,
-        params.vep_include_fasta,
-        vep_cache,
-        vep_extra_files,
         params.seq_center ?: [],
         params.seq_platform ?: [],
         params.aligner,
@@ -193,10 +182,8 @@ workflow NFCORE_RNAVAR {
         params.skip_multiqc,
         params.skip_baserecalibration,
         params.skip_intervallisttools,
-        params.skip_variantannotation,
-        params.skip_variantfiltration,
         params.star_ignore_sjdbgtf,
-        params.tools ?: "no_tools",
+        params.tools ?: "no_tools"
     )
 
     reports = reports.mix(RNAVAR.out.reports)
